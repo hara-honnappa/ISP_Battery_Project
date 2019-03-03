@@ -1,0 +1,15 @@
+/*
+ * battery_service_profile.h
+ *
+ *  Created on: Mar 1, 2019
+ *      Author: PUTTANNA YALE
+ */
+
+#ifndef PROFILES_BATTERY_SERVICE_PROFILE_H_
+#define PROFILES_BATTERY_SERVICE_PROFILE_H_
+
+
+
+
+
+#endif /* PROFILES_BATTERY_SERVICE_PROFILE_H_ */
