@@ -143,7 +143,7 @@
 #endif // !Display_DISABLE_ALL
 
 // Task configuration
-#define SBP_TASK_PRIORITY                     1
+#define SBP_TASK_PRIORITY                     2
 #define I2C_TASK_PRIORITY                     1
 
 #ifndef SBP_TASK_STACK_SIZE
@@ -165,13 +165,15 @@
 #define SBP_PERIODIC_EVT                      Event_Id_00
 #define SBP_PERIODIC_NOTIFY_START_EVT         Event_Id_01
 #define SBP_PERIODIC_NOTIFY_SEND_EVT		  Event_Id_02
+#define SBP_PERIODIC_I2C_UPDATE				  Event_Id_03
 
 // Bitwise OR of all events to pend on
 #define SBP_ALL_EVENTS                        (SBP_ICALL_EVT        | \
                                                SBP_QUEUE_EVT        | \
                                                SBP_PERIODIC_EVT     | \
                                                SBP_PERIODIC_NOTIFY_START_EVT | \
-                                               SBP_PERIODIC_NOTIFY_SEND_EVT)
+                                               SBP_PERIODIC_NOTIFY_SEND_EVT | \
+                                               SBP_PERIODIC_I2C_UPDATE)
 
 // Events for I2C Task
 #define I2C_CLK_EVT                           Event_Id_00
@@ -296,8 +298,8 @@ static uint8_t advertData[] =
   // in this peripheral
   0x03,   // length of this data
   GAP_ADTYPE_16BIT_MORE,      // some of the UUID's, but not all
-  LO_UINT16(SIMPLEPROFILE_SERV_UUID),
-  HI_UINT16(SIMPLEPROFILE_SERV_UUID)
+  LO_UINT16(BATTERYSERVICE_SERV_UUID),
+  HI_UINT16(BATTERYSERVICE_SERV_UUID)
 };
 
 // GAP GATT Attributes
@@ -422,6 +424,9 @@ typedef enum
 
 // Handle the registration and un-registration for the connection event, since only one can be registered.
 uint32_t       connectionEventRegisterCauseBitMap = NOT_REGISTER; //see connectionEventRegisterCause_u
+
+uint8_t         txBuffer[4];
+uint8_t         rxBuffer[22];
 
 /*********************************************************************
  * @fn      SimplePeripheral_RegistertToAllConnectionEvent()
@@ -568,13 +573,16 @@ static void SimplePeripheral_init(void)
   appMsgQueue = Util_constructQueue(&appMsg);
 
   // Create one-shot clocks for internal periodic events.
-  Util_constructClock(&periodicClock, SimplePeripheral_clockHandler,
-                      SBP_PERIODIC_EVT_PERIOD, 0, false, SBP_PERIODIC_EVT);
+//  Util_constructClock(&periodicClock, SimplePeripheral_clockHandler,
+//                      SBP_PERIODIC_EVT_PERIOD, 0, false, SBP_PERIODIC_EVT);
   Event_Params_init(&i2cEventParams); // init params before creating event instance
   i2cEventHandle = Event_create(&i2cEventParams, NULL);
+  if(initI2CDriver())
+  {
   // Create periodic clock for reading from SMBUS IC
   Util_constructClock(&i2cRxTxClock, clkI2CTaskHandler,
-                      SBP_PERIODIC_I2CRXTX_PERIOD, SBP_PERIODIC_I2CRXTX_PERIOD, true, SBP_PERIODIC_EVT);
+	                  SBP_PERIODIC_I2CRXTX_PERIOD, SBP_PERIODIC_I2CRXTX_PERIOD, false, SBP_PERIODIC_I2C_UPDATE);  	
+  }
   // Create periodic clock for notifying SMBUS data over BLE
   Util_constructClock(&periodicStartNotify, clkSendNotifyBeginEvt,
                       SBP_PERIODIC_NOTIFY_START_PERIOD, SBP_PERIODIC_NOTIFY_START_PERIOD, false, SBP_PERIODIC_NOTIFY_START_EVT);
@@ -764,6 +772,7 @@ static void SimplePeripheral_init(void)
  */
 static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 {
+   uint8_t counter = 0;
   uint8_t notifyCnt = 0;
   // Initialize application
   SimplePeripheral_init();
@@ -833,8 +842,29 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
         SimplePeripheral_performPeriodicTask();
       }
 
+      if( events & SBP_PERIODIC_I2C_UPDATE )
+      {
+      	Util_startClock(&i2cRxTxClock);
+		{
+		  if(counter >= 15)
+		  {
+			  counter = 0;
+		  } 	
+		  txBuffer[0] = i2cObjArray[counter].sbsCommand;// register address on device to read
+		  i2cTransaction.slaveAddress = (SMBUS_SLAVE_ADDRS>>1); //device address
+		  i2cTransaction.writeBuf = txBuffer;
+		  i2cTransaction.writeCount = 1;
+		  i2cTransaction.readBuf = rxBuffer;
+		  i2cTransaction.readCount = 2;
+		  i2cTransaction.arg = (void*)&(i2cObjArray[counter].paramUUID);
+		  I2C_transfer(i2c, &i2cTransaction);
+		  counter++;
+		}
+      }
+
       if( events & SBP_PERIODIC_NOTIFY_START_EVT )
       {
+      	Util_stopClock(&i2cRxTxClock);
       	Util_startClock(&periodicsendNotify);
 		notifyCnt = 0;
 	  	GPIO_write(Board_GPIO_LED1, Board_GPIO_LED_ON);
@@ -847,6 +877,7 @@ static void SimplePeripheral_taskFxn(UArg a0, UArg a1)
 		  if(notifyCnt >= 15)
 		  {
 		  	Util_stopClock(&periodicsendNotify);
+			Util_startClock(&i2cRxTxClock);
 			notifyCnt = 0;
 			GPIO_write(Board_GPIO_LED1, Board_GPIO_LED_OFF);
 		  }
@@ -1138,6 +1169,7 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
 
     case GAPROLE_ADVERTISING:
       Display_print0(dispHandle, 2, 0, "Advertising");
+	  Util_startClock(&i2cRxTxClock);
       break;
 
 #ifdef PLUS_BROADCASTER
@@ -1172,7 +1204,7 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
         linkDBInfo_t linkInfo;
         uint8_t numActive = 0;
 
-        Util_startClock(&periodicClock);
+//        Util_startClock(&periodicClock);
         Util_startClock(&periodicStartNotify);
 
         numActive = linkDB_NumActive();
@@ -1223,7 +1255,7 @@ static void SimplePeripheral_processStateChangeEvt(gaprole_States_t newState)
       break;
 
     case GAPROLE_WAITING:
-      Util_stopClock(&periodicClock);
+ //     Util_stopClock(&periodicClock);
       Util_stopClock(&periodicStartNotify);
 	  Util_stopClock(&periodicsendNotify);
       attRsp_freeAttRsp(bleNotConnected);
@@ -1529,7 +1561,7 @@ static void SimplePeripheral_clockHandler(UArg arg)
 static void clkI2CTaskHandler(UArg arg)
 {
   // Wake up the application.
-  Event_post(i2cEventHandle, arg);
+  Event_post(syncEvent, arg); //old - i2cEventHandle
 }
 
 /*********************************************************************
@@ -1629,19 +1661,17 @@ static bool initI2CDriver(void)
     i2cParams.transferCallbackFxn = i2cTxRxCallback;
     i2c = I2C_open(Board_I2C_TMP, &i2cParams);
     if (i2c == NULL) {
-        Display_printf(dispHandle, 5, 0, "Error Initializing I2C\n");
+        Display_print0(dispHandle, 5, 0, "Error Initializing I2C\n");
 //        while (1);
         success = FALSE;
     }
     else {
-        Display_printf(dispHandle, 5, 0, "I2C Initialized!\n");
+        Display_print0(dispHandle, 5, 0, "I2C Initialized!\n");
     }
 
     return success;
 }
 
-uint8_t         txBuffer[4];
-uint8_t         rxBuffer[22];
 
 /*********************************************************************
  * @fn		i2cMainTask
